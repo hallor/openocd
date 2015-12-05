@@ -270,10 +270,9 @@ static int jtagdp_transaction_endcheck(struct adiv5_dap *dap)
 	if (ctrlstat & (SSTICKYORUN | SSTICKYERR)) {
 		LOG_DEBUG("jtag-dp: CTRL/STAT error, 0x%" PRIx32, ctrlstat);
 		/* Check power to debug regions */
-		if ((ctrlstat & 0xf0000000) != 0xf0000000) {
-			retval = ahbap_debugport_init(dap);
-			if (retval != ERROR_OK)
-				return retval;
+		if ((ctrlstat & (CDBGPWRUPREQ | CDBGPWRUPACK)) != (CDBGPWRUPREQ | CDBGPWRUPACK)) {
+			LOG_ERROR("CDBGPWRxxx signals are off, debug regions are not powered");
+			return ERROR_JTAG_DEVICE_ERROR;
 		} else {
 			uint32_t mem_ap_csw, mem_ap_tar;
 

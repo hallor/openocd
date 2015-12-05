@@ -642,6 +642,8 @@ extern const struct dap_ops jtag_dp_ops;
  */
 int ahbap_debugport_init(struct adiv5_dap *dap)
 {
+	/* check that we support packed transfers */
+	uint32_t csw, cfg;
 	int retval;
 
 	LOG_DEBUG(" ");
@@ -663,70 +665,92 @@ int ahbap_debugport_init(struct adiv5_dap *dap)
 	dap_ap_select(dap, 0);
 	dap->last_read = NULL;
 
-	/* DP initialization */
+	for (size_t i = 0; i < 10; i++) {
+		/* DP initialization */
 
-	dap->dp_bank_value = 0;
+		dap->dp_bank_value = 0;
 
-	retval = dap_queue_dp_read(dap, DP_CTRL_STAT, NULL);
-	if (retval != ERROR_OK)
-		return retval;
+		retval = dap_queue_dp_read(dap, DP_CTRL_STAT, NULL);
+		if (retval != ERROR_OK)
+			continue;
 
-	retval = dap_queue_dp_write(dap, DP_CTRL_STAT, SSTICKYERR);
-	if (retval != ERROR_OK)
-		return retval;
+		retval = dap_queue_dp_write(dap, DP_CTRL_STAT, SSTICKYERR);
+		if (retval != ERROR_OK)
+			continue;
 
-	retval = dap_queue_dp_read(dap, DP_CTRL_STAT, NULL);
-	if (retval != ERROR_OK)
-		return retval;
+		retval = dap_queue_dp_read(dap, DP_CTRL_STAT, NULL);
+		if (retval != ERROR_OK)
+			continue;
 
-	dap->dp_ctrl_stat = CDBGPWRUPREQ | CSYSPWRUPREQ;
-	retval = dap_queue_dp_write(dap, DP_CTRL_STAT, dap->dp_ctrl_stat);
-	if (retval != ERROR_OK)
-		return retval;
+		dap->dp_ctrl_stat &= ~CDBGPWRUPREQ;
+		dap->dp_ctrl_stat |= CSYSPWRUPREQ;
+		retval = dap_queue_dp_write(dap, DP_CTRL_STAT, dap->dp_ctrl_stat);
+		if (retval != ERROR_OK)
+			continue;
+		LOG_DEBUG("DAP: wait for CSYSPWRUPACK");
+		retval = dap_dp_poll_register(dap, DP_CTRL_STAT,
+					      CSYSPWRUPACK, CSYSPWRUPACK,
+					      DAP_POWER_DOMAIN_TIMEOUT);
+		if (retval != ERROR_OK) {
+			LOG_DEBUG("DAP: polling CSYSPWRUPACK failed, clearing CSYSPWRREQ and SSTICKYERR");
+			dap->dp_ctrl_stat &= ~CSYSPWRUPREQ;
+			dap->dp_ctrl_stat |= SSTICKYERR;
+			retval = dap_queue_dp_write(dap, DP_CTRL_STAT, dap->dp_ctrl_stat);
+			if (retval != ERROR_OK)
+				LOG_DEBUG("DAP: clearing CSYSPWRREQ and SSTICKYERR failed");
+		}
 
-	/* Check that we have debug power domains activated */
-	LOG_DEBUG("DAP: wait CDBGPWRUPACK");
-	retval = dap_dp_poll_register(dap, DP_CTRL_STAT,
-				      CDBGPWRUPACK, CDBGPWRUPACK,
-				      DAP_POWER_DOMAIN_TIMEOUT);
-	if (retval != ERROR_OK)
-		return retval;
+		dap->dp_ctrl_stat |= CDBGPWRUPREQ;
+		retval = dap_queue_dp_write(dap, DP_CTRL_STAT, dap->dp_ctrl_stat);
+		if (retval != ERROR_OK) {
+			LOG_DEBUG("DAP: write request for CDBGPWRUP failed");
+			continue;
+		}
 
-	LOG_DEBUG("DAP: wait CSYSPWRUPACK");
-	retval = dap_dp_poll_register(dap, DP_CTRL_STAT,
-				      CSYSPWRUPACK, CSYSPWRUPACK,
-				      DAP_POWER_DOMAIN_TIMEOUT);
-	if (retval != ERROR_OK)
-		return retval;
+		/* Check that we have debug power domains activated */
+		LOG_DEBUG("DAP: wait CDBGPWRUPACK");
+		retval = dap_dp_poll_register(dap, DP_CTRL_STAT,
+					      CDBGPWRUPACK, CDBGPWRUPACK,
+					      DAP_POWER_DOMAIN_TIMEOUT);
+		if (retval != ERROR_OK)
+			continue;
 
-	retval = dap_queue_dp_read(dap, DP_CTRL_STAT, NULL);
-	if (retval != ERROR_OK)
-		return retval;
-	/* With debug power on we can activate OVERRUN checking */
-	dap->dp_ctrl_stat = CDBGPWRUPREQ | CSYSPWRUPREQ | CORUNDETECT;
-	retval = dap_queue_dp_write(dap, DP_CTRL_STAT, dap->dp_ctrl_stat);
-	if (retval != ERROR_OK)
-		return retval;
-	retval = dap_queue_dp_read(dap, DP_CTRL_STAT, NULL);
-	if (retval != ERROR_OK)
-		return retval;
+		dap->dp_ctrl_stat |= SSTICKYERR;
+		retval = dap_queue_dp_write(dap, DP_CTRL_STAT, dap->dp_ctrl_stat);
+		if (retval != ERROR_OK)
+			continue;
 
-	/* check that we support packed transfers */
-	uint32_t csw, cfg;
+		retval = dap_queue_dp_read(dap, DP_CTRL_STAT, NULL);
+		if (retval != ERROR_OK)
+			continue;
+		/* With debug power on we can activate OVERRUN checking */
+		dap->dp_ctrl_stat |= CORUNDETECT;
+		retval = dap_queue_dp_write(dap, DP_CTRL_STAT, dap->dp_ctrl_stat);
+		if (retval != ERROR_OK)
+			continue;
+		retval = dap_queue_dp_read(dap, DP_CTRL_STAT, NULL);
+		if (retval != ERROR_OK)
+			continue;
 
-	retval = dap_setup_accessport(dap, CSW_8BIT | CSW_ADDRINC_PACKED, 0);
-	if (retval != ERROR_OK)
-		return retval;
+		retval = dap_setup_accessport(dap, CSW_8BIT | CSW_ADDRINC_PACKED, 0);
+		if (retval != ERROR_OK)
+			continue;
 
-	retval = dap_queue_ap_read(dap, AP_REG_CSW, &csw);
-	if (retval != ERROR_OK)
-		return retval;
+		retval = dap_queue_ap_read(dap, AP_REG_CSW, &csw);
+		if (retval != ERROR_OK)
+			continue;
 
-	retval = dap_queue_ap_read(dap, AP_REG_CFG, &cfg);
-	if (retval != ERROR_OK)
-		return retval;
+		retval = dap_queue_ap_read(dap, AP_REG_CFG, &cfg);
+		if (retval != ERROR_OK)
+			continue;
 
-	retval = dap_run(dap);
+		retval = dap_run(dap);
+		if (retval != ERROR_OK)
+			continue;
+
+		break;
+	}
+
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -838,7 +862,7 @@ int dap_get_debugbase(struct adiv5_dap *dap, int ap,
 	if (ap >= 256)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
-	ap_old = dap->ap_current;
+	ap_old = dap_ap_get_select(dap);
 	dap_ap_select(dap, ap);
 
 	retval = dap_queue_ap_read(dap, AP_REG_BASE, dbgbase);
@@ -867,7 +891,7 @@ int dap_lookup_cs_component(struct adiv5_dap *dap, int ap,
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
 	*addr = 0;
-	ap_old = dap->ap_current;
+	ap_old = dap_ap_get_select(dap);
 	dap_ap_select(dap, ap);
 
 	do {
@@ -986,7 +1010,7 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 			uint32_t c_cid0, c_cid1, c_cid2, c_cid3;
 			uint32_t c_pid0, c_pid1, c_pid2, c_pid3, c_pid4;
 			uint32_t component_base;
-			unsigned part_num;
+			uint32_t part_num;
 			const char *type, *full;
 
 			component_base = (dbgbase & 0xFFFFF000) + (romentry & 0xFFFFF000);
@@ -1234,6 +1258,18 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 				type = "Cortex-M3 FBP";
 				full = "(Flash Patch and Breakpoint)";
 				break;
+			case 0x008:
+				type = "Cortex-M0 SCS";
+				full = "(System Control Space)";
+				break;
+			case 0x00a:
+				type = "Cortex-M0 DWT";
+				full = "(Data Watchpoint and Trace)";
+				break;
+			case 0x00b:
+				type = "Cortex-M0 BPU";
+				full = "(Breakpoint Unit)";
+				break;
 			case 0x00c:
 				type = "Cortex-M4 SCS";
 				full = "(System Control Space)";
@@ -1331,6 +1367,14 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 				type = "Cortex-M4 TPUI";
 				full = "(Trace Port Interface Unit)";
 				break;
+			case 0x9a5:
+				type = "Cortex-A5 ETM";
+				full = "(Embedded Trace)";
+				break;
+			case 0xc05:
+				type = "Cortex-A5 Debug";
+				full = "(Debug Unit)";
+				break;
 			case 0xc08:
 				type = "Cortex-A8 Debug";
 				full = "(Debug Unit)";
@@ -1382,7 +1426,7 @@ static int dap_info_command(struct command_context *cmd_ctx,
 	if (retval != ERROR_OK)
 		return retval;
 
-	ap_old = dap->ap_current;
+	ap_old = dap_ap_get_select(dap);
 	dap_ap_select(dap, ap);
 
 	/* Now we read ROM table ID registers, ref. ARM IHI 0029B sec  */
